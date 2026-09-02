@@ -18,7 +18,7 @@ public static class SilentPayment
 	public static PubKey ComputeSharedSecretReceiver(OutPoint[] prevOuts, PubKey[] pubKeys, Key b) =>
 		ComputeSharedSecret(prevOuts, A: SumPublicKeys(pubKeys), b);
 
-	public static Dictionary<SilentPaymentAddress, PubKey[]> GetPubKeys(IEnumerable<SilentPaymentAddress> recipients, Utxo[] utxos) =>
+	public static Dictionary<SilentPaymentAddress, TaprootPubKey[]> GetPubKeys(IEnumerable<SilentPaymentAddress> recipients, Utxo[] utxos) =>
 		recipients
 			.GroupBy(x => x.ScanKey, (scanKey, addresses) =>
 			{
@@ -29,16 +29,19 @@ public static class SilentPayment
 			})
 			.SelectMany(x => x)
 			.GroupBy(x => x.Address)
-			.ToDictionary(x => x.Key, x => x.Select(y => y.PubKey).ToArray());
+			.ToDictionary(
+				x => x.Key,
+				x => x.Select(y => y.PubKey).ToArray());
 
-	public static (SilentPaymentAddress Address, PubKey PubKey)[] GetPubKeys(IEnumerable<SilentPaymentAddress> addresses, PubKey sharedSecret, PubKey[] outputs) =>
-		Enumerable
+	public static (SilentPaymentAddress Address, TaprootPubKey PubKey)[] GetPubKeys(IEnumerable<SilentPaymentAddress> addresses, PubKey sharedSecret, PubKey[] outputs) =>
+		throw new NotImplementedException();
+		/*Enumerable
 			.Range(0, outputs.Length)
 			.Select(n => addresses.Select(address =>
 				(Address: address, PubKey: ComputePubKey(address.SpendKey, sharedSecret, (uint) n))))
 			.SelectMany(x => x)
 			.Where(x => outputs.Select(o => o.ECKey.Q).Contains(x.PubKey.ECKey.Q))
-			.ToArray();
+			.ToArray();*/
 
 	public static Key CreateLabel(Key scanKey, uint label) =>
 		new (TaggedHash("BIP0352/Label", scanKey.ToBytes().Concat(Serialize32(label)).ToArray()));
@@ -146,17 +149,36 @@ public static class SilentPayment
 		return null;
 	}
 
-	internal static PubKey ComputePubKey(PubKey Bm, PubKey sharedSecret, uint k)
+	/// <param name="Bm">If no label is applied then B_m = B_spend.</param>
+	/// <seealso href="https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki#address-encoding"/>
+	/// <seealso href="https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki#creating-outputs">
+	/// Step 7. 
+	/// </seealso>
+	internal static TaprootPubKey ComputePubKey(PubKey Bm, PubKey sharedSecret, uint k)
 	{
+		// "Let t_k = hash_{BIP0352/SharedSecret}(ser_P(ecdh_shared_secret) || ser_32(k))"
 		using var tk = TweakKey(sharedSecret, k);
 
-		// Let Pmk = k·G + Bm
-		var pmk = tk.PubKey.ECKey.Q.ToGroupElementJacobian() + Bm.ECKey.Q;
-		return new PubKey(new ECXOnlyPubKey(pmk.ToGroupElement(), null).ToBytes());
+		// "Let P_mn = t_k·G + Bm"
+		var pmn = tk.PubKey.ECKey.Q.ToGroupElementJacobian() + Bm.ECKey.Q;
+
+		// "Encode P_mn as a BIP341 taproot output"
+		var xOnlyPubkey = new ECXOnlyPubKey(pmn.ToGroupElement(), null).ToBytes();
+		var taprootPubKey = new TaprootPubKey(xOnlyPubkey);
+
+#if NET8_0_OR_GREATER
+		var s = Convert.ToHexString(xOnlyPubkey);
+#endif
+
+		return taprootPubKey;
 	}
 
+	/// <seealso href="https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki#creating-outputs">
+	/// Step 2: For each private key a_i corresponding to a BIP341 taproot output, check that the private key produces a point with an even Y coordinate and negate the private key if not.
+	/// </seealso>
 	private static Key? SumPrivateKeys(Utxo[] utxos)
 	{
+		// "Let a = a_1 + a_2 + ... + a_n, where each a_i has been negated if necessary"
 		var sum = Scalar.Zero;
 
 		foreach (var utxo in utxos)
@@ -166,9 +188,6 @@ public static class SilentPayment
 
 			if (utxo.ScriptPubKey.IsScriptType(ScriptType.Taproot))
 			{
-				// CreateXOnlyPubKey's `parity` out-param is true when the
-				// corresponding point has an odd Y (i.e. NOT has_even_y()),
-				// which is exactly the negation condition from the Python ref.
 				pk.CreateXOnlyPubKey(out bool parity);
 				if (parity)
 				{
@@ -181,19 +200,12 @@ public static class SilentPayment
 
 		if (sum.IsZero)
 		{
-			// Mirrors Python's `return []` fail path - caller should treat
-			// this as "no outputs can be created".
+			// "If a = 0, fail"
+			// No outputs can be created. Stop.
 			return null;
 		}
 
 		return new Key(sum.ToBytes());
-
-		//ECPrivKey NegateKey(Key key, bool isTaproot)
-		//{
-		//	var pk = ECPrivKey.Create(key.ToBytes());
-		//	pk.CreateXOnlyPubKey(out var parity);
-		//	return isTaproot && parity ? ECPrivKey.Create(pk.sec.Negate().ToBytes()) : pk;
-		//}
 	}
 
 	// Let A = A1 + A2 + ... + An

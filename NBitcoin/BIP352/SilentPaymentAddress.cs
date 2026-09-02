@@ -6,6 +6,7 @@ using NBitcoin.Secp256k1;
 
 namespace NBitcoin.BIP352;
 
+/// <seealso href="https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki#address-encoding"/>
 public class SilentPaymentAddress
 {
 	public SilentPaymentAddress(int Version, PubKey ScanKey, PubKey SpendKey)

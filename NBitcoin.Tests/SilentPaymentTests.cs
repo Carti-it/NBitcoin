@@ -17,7 +17,7 @@ public class SilentPaymentTests
 	[MemberData(nameof(SilentPaymentTestVector.TestCases), MemberType = typeof(SilentPaymentTestVector))]
 	public void TestVectors(SilentPaymentTestVector test)
 	{
-		// Test sending functionality
+		// Test sending functionality (Alice sends funds to Bob)
 		foreach (var sending in test.Sending)
 		{
 			var given = sending.Given;
@@ -43,11 +43,14 @@ public class SilentPaymentTests
 					recipients.Add(silentPaymentAddress);
 				}
 
-				var xonlyPks = SilentPayment.GetPubKeys(recipients, utxos);
-				var actual = xonlyPks.SelectMany(x => x.Value).Select(x => Encoders.Hex.EncodeData(x.ToBytes()));
+				var xOnlyPks = SilentPayment.GetPubKeys(recipients, utxos);
+				var actualOutputs = xOnlyPks
+					.SelectMany(x => x.Value)
+					.Select(x => Encoders.Hex.EncodeData(x.ToBytes()))
+					.ToHashSet();
 
-				var expected = sending.Expected;
-				Assert.Subset(expected.Outputs.SelectMany(x => x).ToHashSet(), actual.ToHashSet());
+				var expectedOutputs = sending.Expected.Outputs.SelectMany(x => x).ToHashSet();
+				Assert.Subset(expectedOutputs, actualOutputs);
 			}
 			catch (ArgumentException e) when (e.Message.Contains("Invalid ec private key") && test.Comment.Contains("point at infinity"))
 			{
@@ -55,7 +58,7 @@ public class SilentPaymentTests
 			}
 		}
 
-		// Test receiving functionality
+		// Test receiving functionality (Bob receives funds from Alice)
 
 		// message and auxiliary data used in signature
 		// see: https://github.com/bitcoinops/taproot-workshop/blob/master/1.1-schnorr-signatures.ipynb

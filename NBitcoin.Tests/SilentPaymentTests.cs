@@ -1,10 +1,12 @@
 #if HAS_SPAN
-using System;
-using System.IO;
-using System.Linq;
+#nullable enable
 using NBitcoin.BIP352;
 using NBitcoin.DataEncoders;
 using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using Xunit;
 
 namespace NBitcoin.Tests;
@@ -12,32 +14,48 @@ namespace NBitcoin.Tests;
 public class SilentPaymentTests
 {
 	[Theory]
-	[MemberData(nameof(SilentPaymentTestVector.TestCasesData), MemberType = typeof(SilentPaymentTestVector))]
+	[MemberData(nameof(SilentPaymentTestVector.TestCases), MemberType = typeof(SilentPaymentTestVector))]
 	public void TestVectors(SilentPaymentTestVector test)
 	{
-		// Sending functionality
+		// Test sending functionality
 		foreach (var sending in test.Sending)
 		{
 			var given = sending.Given;
-			var expected = sending.Expected;
 			try
 			{
-				var utxos = given.Vin.Select(x => new Utxo(
-					new OutPoint(uint256.Parse(x.TxId), x.Vout), new Key(Encoders.Hex.DecodeData(x.Private_Key)),
-					Script.FromHex(x.PrevOut.ScriptPubKey.Hex))).ToArray();
-				var recipients = given.Recipients.Select(x => SilentPaymentAddress.Parse(x, Network.Main));
+				var utxos = given.Vin
+					.Select(x => new Utxo(
+						OutPoint: new OutPoint(uint256.Parse(x.TxId), x.Vout),
+						SigningKey: new Key(Encoders.Hex.DecodeData(x.PrivateKey)),
+						ScriptPubKey: Script.FromHex(x.PrevOut.ScriptPubKey.Hex)))
+					.ToArray();
+
+				// Parse recipients and verify that the scan and spend keys match the expected values
+				var recipients = new List<SilentPaymentAddress>();
+
+				foreach (var recipient in given.Recipients)
+				{
+					var silentPaymentAddress = SilentPaymentAddress.Parse(recipient.Address, Network.Main);
+
+					Assert.Equal(recipient.ScanPubKey, silentPaymentAddress.ScanKey.ToHex());
+					Assert.Equal(recipient.SpendPubKey, silentPaymentAddress.SpendKey.ToHex());
+
+					recipients.Add(silentPaymentAddress);
+				}
+
 				var xonlyPks = SilentPayment.GetPubKeys(recipients, utxos);
 				var actual = xonlyPks.SelectMany(x => x.Value).Select(x => Encoders.Hex.EncodeData(x.ToBytes()));
 
+				var expected = sending.Expected;
 				Assert.Subset(expected.Outputs.SelectMany(x => x).ToHashSet(), actual.ToHashSet());
 			}
-			catch (ArgumentException e) when(e.Message.Contains("Invalid ec private key") && test.Comment.Contains("point at infinity"))
+			catch (ArgumentException e) when (e.Message.Contains("Invalid ec private key") && test.Comment.Contains("point at infinity"))
 			{
 				// ignore because it is expected to fail;
 			}
 		}
 
-		// Receiving functionality
+		// Test receiving functionality
 
 		// message and auxiliary data used in signature
 		// see: https://github.com/bitcoinops/taproot-workshop/blob/master/1.1-schnorr-signatures.ipynb
@@ -52,21 +70,21 @@ public class SilentPaymentTests
 			{
 				var prevOuts = given.Vin.Select(x => OutPoint.Parse(x.TxId + "-" + x.Vout)).ToArray();
 				var pubKeys = given.Vin.Select(ExtractPubKey).DropNulls().ToArray();
-				if (!pubKeys.Any())
+				if (pubKeys.Length == 0)
 				{
 					continue; // if there are no pubkeys then nothing can be done
 				}
 
 				// Parse key material (scan and spend keys)
-				using var scanKey = ParsePrivKey(given.Key_Material.scan_priv_key);
-				using var spendKey = ParsePrivKey(given.Key_Material.spend_priv_key);
+				using var scanKey = ParsePrivKey(given.Key_Material.ScanPrivKey);
+				using var spendKey = ParsePrivKey(given.Key_Material.SpendPrivKey);
 
 				// Addresses
 				var baseAddress = new SilentPaymentAddress(0, scanKey.PubKey, spendKey.PubKey);
 
 				// Creates a lookup table Dic<SilentPaymentAddress, (ECPrivKey labelSecret, ECPubKey labelPubKey)>
 				var addressesTable = given.Labels
-					.Select(label => SilentPayment.CreateLabel(scanKey, (uint) label))
+					.Select(label => SilentPayment.CreateLabel(scanKey, (uint)label))
 					.Select(labelSecret => new LabelInfo.Full(labelSecret, labelSecret.PubKey))
 					.Select(labelInfo => (LabelInfo: (LabelInfo)labelInfo, Address: baseAddress.DeriveAddressForLabel(labelInfo.PubKey))) // each label has a different address
 					.Prepend((LabelInfo: new LabelInfo.None(), baseAddress))
@@ -79,11 +97,11 @@ public class SilentPaymentTests
 
 				// Outputs
 				var givenOutputPubKeys = given.Outputs.Select(ParseXOnlyPubKey).ToArray();
-				var detectedOutputPubKeys = SilentPayment.GetPubKeys(addresses.ToArray(), sharedSecret, givenOutputPubKeys);
-				var detectedOutputs = detectedOutputPubKeys.Select(x => Encoders.Hex.EncodeData(x.PubKey.ToBytes())).ToArray();
-				var expectedOutputs = expected.Outputs.Select(x => x.pub_key).ToArray();
+				var detectedOutputPubKeys = SilentPayment.GetPubKeys(addresses, sharedSecret, givenOutputPubKeys);
+				var detectedOutputs = detectedOutputPubKeys.Select(x => Encoders.Hex.EncodeData(x.PubKey.ToBytes())).ToHashSet();
+				var expectedOutputs = expected.Outputs.Select(x => x.PubKey).ToHashSet();
 
-				Assert.Equal(detectedOutputs.ToHashSet(), expectedOutputs.ToHashSet());
+				Assert.Equal(detectedOutputs, expectedOutputs);
 
 				// Tweak Key
 
@@ -94,8 +112,9 @@ public class SilentPaymentTests
 
 				// Compute tweakKey for each detected output
 				var tweakKeys = detectedXonlyWithLabelInfo
-					.Select((pk, k) => {
-						var tk = SilentPayment.TweakKey(sharedSecret, (uint) k);
+					.Select((pk, k) =>
+					{
+						var tk = SilentPayment.TweakKey(sharedSecret, (uint)k);
 						return pk.LabelInfo switch
 						{
 							LabelInfo.None => (pk.PubKey, TweakKey: tk),
@@ -105,34 +124,34 @@ public class SilentPaymentTests
 					})
 					.ToArray();
 
-				var detectedTweakKeys = tweakKeys.Select(x => Encoders.Hex.EncodeData(x.TweakKey.ToBytes()));
-				var expectedTweakKeys = expected.Outputs.Select(o => o.priv_key_tweak);
+				var detectedTweakKeys = tweakKeys.Select(x => Encoders.Hex.EncodeData(x.TweakKey.ToBytes())).ToHashSet();
+				var expectedTweakKeys = expected.Outputs.Select(o => o.PrivKeyTweak).ToHashSet();
 
-				Assert.Equal(expectedTweakKeys.ToHashSet(), detectedTweakKeys.ToHashSet());
+				Assert.Equal(expectedTweakKeys, detectedTweakKeys);
 
 				// Signature
-				var expectedSignature = expected.Outputs.Select(o => o.signature).ToHashSet();
+				var expectedSignature = expected.Outputs.Select(o => o.Signature).ToHashSet();
 				var tweakKeyMap = tweakKeys.ToDictionary(x => x.PubKey, x => x.TweakKey);
 				var computedSignatures = detectedOutputPubKeys
 					.Select(x => (x.Address, x.PubKey, TweakKey: tweakKeyMap[x.PubKey]))
 					.Select(x => SilentPayment.ComputePrivKey(spendKey, x.TweakKey))
 					.Select(x => x._ECKey.SignBIP340(msg, aux))
 					.Select(x => Encoders.Hex.EncodeData(x.ToBytes()))
-					.ToArray();
+					.ToHashSet();
 
-				Assert.Equal(expectedSignature.ToHashSet(), computedSignatures.ToHashSet());
+				Assert.Equal(expectedSignature, computedSignatures);
 			}
-			catch (InvalidOperationException e) when(e.Message.Contains("infinite") && test.Comment.Contains("point at infinity"))
+			catch (InvalidOperationException e) when (e.Message.Contains("infinite") && test.Comment.Contains("point at infinity"))
 			{
 				// ignore because it is expected to fail;
 			}
 		}
 
 		PubKey ParseXOnlyPubKey(string pk) =>
-			new (Encoders.Hex.DecodeData(pk));
+			new(Encoders.Hex.DecodeData(pk));
 
 		Key ParsePrivKey(string pk) =>
-			new (Encoders.Hex.DecodeData(pk));
+			new(Encoders.Hex.DecodeData(pk));
 	}
 
 
@@ -140,202 +159,153 @@ public class SilentPaymentTests
 	{
 		var spk = Script.FromHex(vin.PrevOut.ScriptPubKey.Hex);
 		var scriptSig = Script.FromHex(vin.ScriptSig);
-		var txInWitness = string.IsNullOrEmpty(vin.TxInWitness) ? null :  new WitScript (Encoders.Hex.DecodeData(vin.TxInWitness));
+		var txInWitness = string.IsNullOrEmpty(vin.TxInWitness) ? null : new WitScript(Encoders.Hex.DecodeData(vin.TxInWitness));
 		return SilentPayment.ExtractPubKey(scriptSig, txInWitness, spk);
 	}
 }
 
-public class ScriptPubKey
+public class ScriptPubKey(string Hex)
 {
-	public ScriptPubKey(string Hex)
-	{
-		this.Hex = Hex;
-	}
-
-	public string Hex { get;  }
+	public string Hex { get; } = Hex;
 }
 
-public class Output
+public class Output(ScriptPubKey ScriptPubKey)
 {
-	public Output(ScriptPubKey ScriptPubKey)
-	{
-		this.ScriptPubKey = ScriptPubKey;
-	}
-
-	public ScriptPubKey ScriptPubKey { get;  }
+	public ScriptPubKey ScriptPubKey { get; } = ScriptPubKey;
 }
 
-public class ReceivingExpectedOutput
+public class ReceivingExpectedOutput(string PrivKeyTweak, string PubKey, string Signature)
 {
-	public ReceivingExpectedOutput(string PrivKeyTweak, string PubKey, string Signature)
-	{
-		priv_key_tweak = PrivKeyTweak;
-		pub_key = PubKey;
-		signature = Signature;
-	}
+	[JsonProperty("priv_key_tweak")]
+	public string PrivKeyTweak { get; } = PrivKeyTweak;
 
-	public string priv_key_tweak { get;  }
-	public string pub_key { get;  }
-	public string signature { get;  }
+	[JsonProperty("pub_key")]
+	public string PubKey { get; } = PubKey;
+
+	[JsonProperty("signature")]
+	public string Signature { get; } = Signature;
 }
 
-public class ReceivingVin
+public class ReceivingVin(string TxId, int Vout, Output PrevOut, string? ScriptSig, string? TxInWitness)
 {
-	public ReceivingVin(string TxId, int Vout, Output PrevOut, string? ScriptSig, string? TxInWitness)
-	{
-		this.TxId = TxId;
-		this.Vout = Vout;
-		this.PrevOut = PrevOut;
-		this.ScriptSig = ScriptSig;
-		this.TxInWitness = TxInWitness;
-	}
-
-	public string TxId { get;  }
-	public int Vout { get;  }
-	public Output PrevOut { get;  }
-	public string ScriptSig { get;  }
-	public string TxInWitness { get;  }
+	public string TxId { get; } = TxId;
+	public int Vout { get; } = Vout;
+	public Output PrevOut { get; } = PrevOut;
+	public string? ScriptSig { get; } = ScriptSig;
+	public string? TxInWitness { get; } = TxInWitness;
 }
 
-public class SendingVin
+public class SendingVin(string TxId, int Vout, string PrivateKey, Output PrevOut)
 {
-	public SendingVin(string TxId, int Vout, string PrivateKey, Output PrevOut)
-	{
-		this.TxId = TxId;
-		this.Vout = Vout;
-		Private_Key = PrivateKey;
-		this.PrevOut = PrevOut;
-	}
+	[JsonProperty("txid")]
+	public string TxId { get; } = TxId;
 
-	public string TxId { get;  }
-	public int Vout { get;  }
-	public string Private_Key { get;  }
-	public Output PrevOut { get;  }
+	[JsonProperty("vout")]
+	public int Vout { get; } = Vout;
+
+	[JsonProperty("private_key")]
+	public string PrivateKey { get; } = PrivateKey;
+
+	[JsonProperty("prevout")]
+	public Output PrevOut { get; } = PrevOut;
 }
 
-public class SendingGiven
+public class Recipient(string Address, string ScanPubKey, string SpendPubKey)
 {
-	public SendingGiven(SendingVin[] Vin, string[] Recipients)
-	{
-		this.Vin = Vin;
-		this.Recipients = Recipients;
-	}
+	[JsonProperty("address")]
+	public string Address { get; } = Address;
 
-	public SendingVin[] Vin { get;  }
-	public string[] Recipients { get;  }
+	[JsonProperty("scan_pub_key")]
+	public string ScanPubKey { get; } = ScanPubKey;
+
+	[JsonProperty("spend_pub_key")]
+	public string SpendPubKey { get; } = SpendPubKey;
 }
 
-public class KeyMaterial
+public class SendingGiven(SendingVin[] Vin, Recipient[] Recipients)
 {
-	public KeyMaterial(string SpendPrivKey, string ScanPrivKey)
-	{
-		spend_priv_key = SpendPrivKey;
-		scan_priv_key = ScanPrivKey;
-	}
-
-	public string spend_priv_key { get;  }
-	public string scan_priv_key { get;  }
+	public SendingVin[] Vin { get; } = Vin;
+	public Recipient[] Recipients { get; } = Recipients;
 }
 
-public class ReceivingGiven
+public class KeyMaterial(string SpendPrivKey, string ScanPrivKey)
 {
-	public ReceivingGiven(ReceivingVin[] Vin, string[] Outputs, KeyMaterial KeyMaterial, int[] Labels)
-	{
-		this.Vin = Vin;
-		this.Outputs = Outputs;
-		Key_Material = KeyMaterial;
-		this.Labels = Labels;
-	}
+	[JsonProperty("spend_priv_key")]
+	public string SpendPrivKey { get; } = SpendPrivKey;
 
-	public ReceivingVin[] Vin { get;  }
-	public string[] Outputs { get;  }
-	public KeyMaterial Key_Material { get;  }
-	public int[] Labels { get;  }
+	[JsonProperty("scan_priv_key")]
+	public string ScanPrivKey { get; } = ScanPrivKey;
 }
 
-public class SendingExpected
+public class ReceivingGiven(ReceivingVin[] Vin, string[] Outputs, KeyMaterial KeyMaterial, int[] Labels)
 {
-	public SendingExpected(string[][] Outputs)
-	{
-		this.Outputs = Outputs;
-	}
-
-	public string[][] Outputs { get;  }
+	public ReceivingVin[] Vin { get; } = Vin;
+	public string[] Outputs { get; } = Outputs;
+	public KeyMaterial Key_Material { get; } = KeyMaterial;
+	public int[] Labels { get; } = Labels;
 }
 
-public class ReceivingExpected
+public class SendingExpected(string[][] Outputs, string[] SharedSecrets, string InputPrivateKeySum, string[] InputPubKeys)
 {
-	public ReceivingExpected(string[] Addresses, ReceivingExpectedOutput[] Outputs)
-	{
-		this.Addresses = Addresses;
-		this.Outputs = Outputs;
-	}
+	public string[][] Outputs { get; } = Outputs;
 
-	public string[] Addresses { get;  }
-	public ReceivingExpectedOutput[] Outputs { get;  }
+	[JsonProperty("shared_secrets")]
+	public string[] SharedSecrets { get; } = SharedSecrets;
+
+	[JsonProperty("input_private_key_sum")]
+	public string InputPrivateKeySum { get; } = InputPrivateKeySum;
+
+	[JsonProperty("input_pub_keys")]
+	public string[] InputPubKeys { get; } = InputPubKeys;
 }
 
-public class Sending
+public class ReceivingExpected(string[] Addresses, ReceivingExpectedOutput[] Outputs, string Tweak, string SharedSecret, string InputPubKeySum)
 {
-	public Sending(SendingGiven Given, SendingExpected Expected)
-	{
-		this.Given = Given;
-		this.Expected = Expected;
-	}
+	public string[] Addresses { get; } = Addresses;
+	public ReceivingExpectedOutput[] Outputs { get; } = Outputs;
 
-	public SendingGiven Given { get;  }
-	public SendingExpected Expected { get;  }
+	[JsonProperty("tweak")]
+	public string Tweak { get; } = Tweak;
+
+	[JsonProperty("shared_secret")]
+	public string SharedSecret { get; } = SharedSecret;
+
+	[JsonProperty("input_pub_key_sum")]
+	public string InputPubKeySum { get; } = InputPubKeySum;
 }
 
-public class Receiving
+public class Sending(SendingGiven Given, SendingExpected Expected)
 {
-	public Receiving(ReceivingGiven Given, ReceivingExpected Expected)
-	{
-		this.Given = Given;
-		this.Expected = Expected;
-	}
-
-	public ReceivingGiven Given { get;  }
-	public ReceivingExpected Expected { get;  }
+	public SendingGiven Given { get; } = Given;
+	public SendingExpected Expected { get; } = Expected;
 }
 
-public class SilentPaymentTestVector
+public class Receiving(ReceivingGiven Given, ReceivingExpected Expected)
 {
-	public string Comment { get; }
-	public Sending[] Sending { get; }
-	public Receiving[] Receiving { get; }
+	public ReceivingGiven Given { get; } = Given;
+	public ReceivingExpected Expected { get; } = Expected;
+}
 
-	public  SilentPaymentTestVector(string comment, Sending[] Sending, Receiving[] Receiving)
-	{
-		Comment = comment;
-		this.Sending = Sending;
-		this.Receiving = Receiving;
-	}
+public class SilentPaymentTestVector(string Comment, Sending[] Sending, Receiving[] Receiving)
+{
+	public string Comment { get; } = Comment;
+	public Sending[] Sending { get; } = Sending;
+	public Receiving[] Receiving { get; } = Receiving;
 
 	private static SilentPaymentTestVector[] VectorsData() =>
-		JsonConvert.DeserializeObject<SilentPaymentTestVector[]>(
-			File.ReadAllText("./data/SilentPaymentTestVectors.json"))!;
+		JsonConvert.DeserializeObject<SilentPaymentTestVector[]>(File.ReadAllText("./data/SilentPaymentTestVectors.json"))!;
 
-	private static readonly SilentPaymentTestVector[] TestCases = VectorsData().ToArray();
-
-	public static object[][] TestCasesData =>
-		TestCases.Select(testCase => new object[] { testCase }).ToArray();
+	public static readonly TheoryData<SilentPaymentTestVector> TestCases = new(VectorsData());
 
 	public override string ToString() => Comment;
 }
 
 public abstract class LabelInfo
 {
-	public class Full : LabelInfo
+	public class Full(Key Secret, PubKey PubKey) : LabelInfo
 	{
-		public Key Secret { get; }
-		public PubKey PubKey { get; }
-
-		public Full(Key Secret, PubKey PubKey)
-		{
-			this.Secret = Secret;
-			this.PubKey = PubKey;
-		}
+		public Key Secret { get; } = Secret;
+		public PubKey PubKey { get; } = PubKey;
 	}
 
 	public class None : LabelInfo;

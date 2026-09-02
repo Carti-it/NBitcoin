@@ -184,6 +184,7 @@
     <None Update="data\SHA3TestVectors.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- https://github.com/bitcoin/bips/blob/master/bip-0352/send_and_receive_test_vectors.json -->
     <None Update="data\SilentPaymentTestVectors.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

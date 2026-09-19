@@ -1,25 +1,20 @@
 using NBitcoin;
+using NBitcoin.Altcoins;
 using NBitcoin.Altcoins.Elements;
-using NBitcoin.Crypto;
-using NBitcoin.DataEncoders;
 using NBitcoin.OpenAsset;
 using NBitcoin.Policy;
-using NBitcoin.Protocol;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Text.Json;
 using Xunit;
 using Xunit.Abstractions;
-using Encoders = NBitcoin.DataEncoders.Encoders;
 using static NBitcoin.Tests.Helpers.PrimitiveUtils;
-using NBitcoin.Altcoins;
+using Encoders = NBitcoin.DataEncoders.Encoders;
 
 namespace NBitcoin.Tests
 {
@@ -3110,38 +3105,45 @@ namespace NBitcoin.Tests
 		//http://brainwallet.org/#tx
 		public void CanParseTransaction()
 		{
+			var tests = TestCaseNew.ReadJson("data/can_parse_transaction.json");
 
-			var tests = TestCase.read_json("data/can_parse_transaction.json");
-
-			foreach (var test in tests.Select(t => t.GetDynamic(0)))
+			foreach (var testCase in tests.Select(t => t[0]))
 			{
-				string raw = test.Raw;
-				Transaction tx = Transaction.Parse(raw, Network.Main);
-				Assert.Equal((int)test.JSON.vin_sz, tx.Inputs.Count);
-				Assert.Equal((int)test.JSON.vout_sz, tx.Outputs.Count);
-				Assert.Equal((uint)test.JSON.lock_time, (uint)tx.LockTime);
+				var raw = testCase.GetProperty("Raw").GetString();
+				var tx = Transaction.Parse(raw, Network.Main);
 
+				var testJson = testCase.GetProperty("JSON");
+				Assert.Equal(testJson.GetProperty("vin_sz").GetInt32(), tx.Inputs.Count);
+				Assert.Equal(testJson.GetProperty("vout_sz").GetInt32(), tx.Outputs.Count);
+				Assert.Equal(testJson.GetProperty("lock_time").GetUInt32(), (uint)tx.LockTime);
+
+				var expectedInputs = testJson.GetProperty("in");
 				for (int i = 0; i < tx.Inputs.Count; i++)
 				{
 					var actualVIn = tx.Inputs[i];
-					var expectedVIn = test.JSON.@in[i];
-					Assert.Equal(uint256.Parse((string)expectedVIn.prev_out.hash), actualVIn.PrevOut.Hash);
-					Assert.Equal((uint)expectedVIn.prev_out.n, actualVIn.PrevOut.N);
-					if (expectedVIn.sequence != null)
-						Assert.Equal((uint)expectedVIn.sequence, (uint)actualVIn.Sequence);
-					Assert.Equal((string)expectedVIn.scriptSig, actualVIn.ScriptSig.ToString());
-					//Can parse the string
-					Assert.Equal((string)expectedVIn.scriptSig, (string)expectedVIn.scriptSig.ToString());
+					var expectedVIn = expectedInputs[i];
+					var prevOut = expectedVIn.GetProperty("prev_out");
+					Assert.Equal(uint256.Parse(prevOut.GetProperty("hash").GetString()), actualVIn.PrevOut.Hash);
+					Assert.Equal(prevOut.GetProperty("n").GetUInt32(), actualVIn.PrevOut.N);
+					if (expectedVIn.TryGetProperty("sequence", out JsonElement sequence) && sequence.ValueKind != JsonValueKind.Null)
+						Assert.Equal(sequence.GetUInt32(), (uint)actualVIn.Sequence);
+					var expectedScriptSig = expectedVIn.GetProperty("scriptSig").GetString();
+					Assert.Equal(expectedScriptSig, actualVIn.ScriptSig.ToString());
+
+					// Can parse the string
+					Assert.Equal(expectedScriptSig, expectedScriptSig.ToString());
 				}
 
+				var expectedOutputs = testJson.GetProperty("out");
 				for (int i = 0; i < tx.Outputs.Count; i++)
 				{
 					var actualVOut = tx.Outputs[i];
-					var expectedVOut = test.JSON.@out[i];
-					Assert.Equal((string)expectedVOut.scriptPubKey, actualVOut.ScriptPubKey.ToString());
-					Assert.Equal(Money.Parse((string)expectedVOut.value), actualVOut.Value);
+					var expectedVOut = expectedOutputs[i];
+					Assert.Equal(expectedVOut.GetProperty("scriptPubKey").GetString(), actualVOut.ScriptPubKey.ToString());
+					Assert.Equal(Money.Parse(expectedVOut.GetProperty("value").GetString()), actualVOut.Value);
 				}
-				var hash = (string)test.JSON.hash;
+
+				var hash = testJson.GetProperty("hash").GetString();
 				var expectedHash = new uint256(Encoders.Hex.DecodeData(hash), false);
 				Assert.Equal(expectedHash, tx.GetHash());
 			}

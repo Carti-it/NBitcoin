@@ -1,12 +1,8 @@
-﻿using System.Diagnostics;
-using NBitcoin.DataEncoders;
+﻿using NBitcoin.DataEncoders;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using Xunit;
-using Xunit.Extensions;
 
 namespace NBitcoin.Tests
 {
@@ -82,7 +78,7 @@ namespace NBitcoin.Tests
 		[Trait("Core", "Core")]
 		public void base58_keys_valid_parse()
 		{
-			var tests = TestCase.read_json("data/base58_keys_valid.json");
+			var tests = TestCaseNew.ReadJson("data/base58_keys_valid.json");
 			Network network;
 			foreach (var test in tests)
 			{
@@ -93,11 +89,11 @@ namespace NBitcoin.Tests
 					continue;
 				}
 
-				string exp_base58string = (string)test[0];
-				byte[] exp_payload = TestUtils.ParseHex((string)test[1]);
-				//const Object &metadata = test[2].get_obj();
-				bool isPrivkey = (bool)test.GetDynamic(2).isPrivkey;
-				bool isTestnet = (bool)test.GetDynamic(2).isTestnet;
+				string exp_base58string = test[0].GetString();
+				byte[] exp_payload = TestUtils.ParseHex(test[1].GetString());
+
+				bool isPrivkey = test[2].GetProperty("isPrivkey").GetBoolean();
+				bool isTestnet = test[2].GetProperty("isTestnet").GetBoolean();
 				if (isTestnet)
 					network = Network.TestNet;
 				else
@@ -105,7 +101,7 @@ namespace NBitcoin.Tests
 
 				if (isPrivkey)
 				{
-					bool isCompressed = (bool)test.GetDynamic(2).isCompressed;
+					bool isCompressed = test[2].GetProperty("isCompressed").GetBoolean();
 
 					// Must be valid private key
 					// Note: CBitcoinSecret::SetString tests isValid, whereas CBitcoinAddress does not!
@@ -121,8 +117,8 @@ namespace NBitcoin.Tests
 				}
 				else
 				{
-					string exp_addrType = (string)test.GetDynamic(2).addrType; // "script" or "pubkey"
-																			   // Must be valid public key
+					string exp_addrType = test[2].GetProperty("addrType").GetString(); // "script" or "pubkey"
+																										// Must be valid public key
 					var addr = network.CreateBitcoinAddress(exp_base58string);
 					Assert.True((addr is BitcoinScriptAddress) == (exp_addrType == "script"), "isScript mismatch" + strTest);
 
@@ -136,14 +132,13 @@ namespace NBitcoin.Tests
 			}
 		}
 
-
 		// Goal: check that generated keys match test vectors
 		[Fact]
 		[Trait("Core", "Core")]
 		public void base58_keys_valid_gen()
 		{
-			var tests = TestCase.read_json("data/base58_keys_valid.json");
-			tests = tests.Concat(TestCase.read_json("data/base58_keys_valid2.json")).ToArray();
+			var tests = TestCaseNew.ReadJson("data/base58_keys_valid.json");
+			tests = tests.Concat(TestCaseNew.ReadJson("data/base58_keys_valid2.json")).ToArray();
 			foreach (var test in tests)
 			{
 				string strTest = test.ToString();
@@ -152,11 +147,11 @@ namespace NBitcoin.Tests
 					Assert.Fail("Bad test: " + strTest);
 					continue;
 				}
-				string exp_base58string = (string)test[0];
-				byte[] exp_payload = TestUtils.ParseHex((string)test[1]);
-				dynamic metadata = test.GetDynamic(2);
-				bool isPrivkey = (bool)metadata.isPrivkey;
-				bool isTestnet = (bool)metadata.isTestnet;
+				string exp_base58string = test[0].GetString();
+				byte[] exp_payload = TestUtils.ParseHex(test[1].GetString());
+
+				bool isPrivkey = (bool)test[2].GetProperty("isPrivkey").GetBoolean();
+				bool isTestnet = (bool)test[2].GetProperty("isTestnet").GetBoolean();
 
 				Network network;
 				if (isTestnet)
@@ -165,14 +160,14 @@ namespace NBitcoin.Tests
 					network = Network.Main;
 				if (isPrivkey)
 				{
-					bool isCompressed = metadata.isCompressed;
+					bool isCompressed = test[2].GetProperty("isCompressed").GetBoolean();
 					Key key = new Key(exp_payload, fCompressedIn: isCompressed);
 					BitcoinSecret secret = network.CreateBitcoinSecret(key);
 					Assert.True(secret.ToString() == exp_base58string, "result mismatch: " + strTest);
 				}
 				else
 				{
-					string exp_addrType = (string)metadata.addrType;
+					string exp_addrType = test[2].GetProperty("addrType").GetString();
 					IAddressableDestination dest;
 					if (exp_addrType == "pubkey")
 					{
@@ -207,12 +202,11 @@ namespace NBitcoin.Tests
 			}
 		}
 
-		public static IEnumerable<object[]> InvalidKeys
+		public static TestCaseNew[] InvalidKeys
 		{
 			get
 			{
-				var dataset = TestCase.read_json("data/base58_keys_invalid.json");
-				return dataset.Select(x => x.ToArray());
+				return TestCaseNew.ReadJson("data/base58_keys_invalid.json");
 			}
 		}
 
@@ -222,7 +216,7 @@ namespace NBitcoin.Tests
 		{
 			foreach (var i in InvalidKeys)
 			{
-				string data = (string)i[0];
+				string data = i[0].GetString();
 				// must be invalid as public and as private key
 				Assert.Throws<FormatException>(() => Network.Main.CreateBitcoinAddress(data));
 				Assert.Throws<FormatException>(() => Network.Main.CreateBitcoinSecret(data));
